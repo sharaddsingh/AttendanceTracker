@@ -14,6 +14,495 @@ STUDENT DASHBOARD JAVASCRIPT - CLEANED VERSION
 ==================================================
 */
 
+/*
+==================================================
+QR SCANNER & CAMERA FUNCTIONALITY - COMPLETE FIX
+==================================================
+*/
+
+// Global variables for camera and QR scanning
+let qrScanner = null;
+let photoCaptureStream = null;
+let currentScannedData = null;
+let currentUser = null;
+let studentProfile = null;
+let notifications = []; // Global notifications array
+
+// QR Scanner Functions - COMPLETE IMPLEMENTATION
+window.openQRScanner = async function() {
+  console.log('🎯 Opening QR Scanner...');
+  
+  try {
+    // Check if QrScanner library is loaded
+    if (typeof QrScanner === 'undefined') {
+      console.error('❌ QrScanner library not loaded');
+      showNotification('Scanner Error', 'QR Scanner library is not available. Please refresh the page.');
+      return;
+    }
+    
+    const scannerModal = document.getElementById('scannerModal');
+    const scannerStatus = document.getElementById('scannerStatus');
+    const qrVideo = document.getElementById('qrReader');
+    
+    if (!scannerModal || !qrVideo) {
+      console.error('❌ Required scanner elements not found');
+      showNotification('Scanner Error', 'Scanner interface not found.');
+      return;
+    }
+    
+    // Show the scanner modal
+    scannerModal.style.display = 'block';
+    scannerStatus.textContent = 'Initializing camera...';
+    scannerStatus.style.color = '#ffc107';
+    
+    // Configure QrScanner worker path
+    QrScanner.WORKER_PATH = 'https://unpkg.com/qr-scanner@1.4.2/qr-scanner-worker.min.js';
+    
+    // Check camera availability
+    const hasCamera = await QrScanner.hasCamera();
+    if (!hasCamera) {
+      scannerStatus.textContent = 'No camera found on device';
+      scannerStatus.style.color = '#dc3545';
+      showNotification('Camera Error', 'No camera found on your device.');
+      return;
+    }
+    
+    // Create QR scanner instance
+    qrScanner = new QrScanner(
+  qrVideo,
+  (result) => {
+    console.log('✅ QR Code detected:', result);
+    onQRCodeDetected(result.data || result);
+  },
+  {
+    returnDetailedScanResult: true,
+    highlightScanRegion: true,
+    highlightCodeOutline: true,
+    maxScansPerSecond: 3,
+    preferredCamera: 'environment'
+  }
+);
+
+    
+    // Start the scanner
+    await qrScanner.start();
+    
+    scannerStatus.textContent = 'Scanner active - Point camera at QR code';
+    scannerStatus.style.color = '#28a745';
+    
+    console.log('✅ QR Scanner started successfully');
+    
+  } catch (error) {
+    console.error('❌ Error starting QR scanner:', error);
+    
+    const scannerStatus = document.getElementById('scannerStatus');
+    if (scannerStatus) {
+      scannerStatus.textContent = 'Camera access denied or error occurred';
+      scannerStatus.style.color = '#dc3545';
+    }
+    
+    let errorMessage = 'Failed to start camera. Please check camera permissions.';
+    if (error.name === 'NotAllowedError') {
+      errorMessage = 'Camera access denied. Please allow camera permission and try again.';
+    } else if (error.name === 'NotFoundError') {
+      errorMessage = 'No camera found on your device.';
+    } else if (error.name === 'NotReadableError') {
+      errorMessage = 'Camera is already in use by another application.';
+    }
+    
+      showNotification('Scanner Error', errorMessage);
+    }
+  }
+
+window.closeQRScanner = function() {
+    console.log("Closing QR Scanner...");
+    try {
+        // Stop and cleanup the scanner
+        if (qrScanner) {
+            qrScanner.stop();
+            qrScanner.destroy();
+            qrScanner = null;
+        }
+        
+        // Hide the scanner modal  
+        const scannerModal = document.getElementById('scannerModal');
+        if (scannerModal) {
+            scannerModal.style.display = 'none';
+        }
+        
+        // Reset scanner status
+        const scannerStatus = document.getElementById('scannerStatus');
+        if (scannerStatus) {
+            scannerStatus.textContent = "Scanner inactive";
+            scannerStatus.style.color = "#6c757d";
+        }
+        
+        // Small delay to ensure camera is fully released
+        setTimeout(() => {
+            console.log("QR Scanner cleanup completed");
+        }, 500);
+        
+    } catch (error) {
+        console.error("Error closing QR scanner:", error);
+    }
+};
+
+// Handle QR code detection
+async function onQRCodeDetected(result) {
+  console.log('🎯 Processing QR code:', result);
+  
+  try {
+    // Handle both old and new QrScanner result formats
+    const resultData = result.data || result;
+    console.log('📱 Raw QR result data:', resultData);
+    
+    // Parse QR code data
+    let qrData;
+    try {
+      qrData = JSON.parse(resultData);
+      console.log('✅ Successfully parsed QR code:', qrData);
+    } catch (parseError) {
+      console.error('❌ Invalid QR code format:', parseError);
+      console.log('Raw QR result:', result);
+      showNotification('Invalid QR Code', 'The scanned QR code is not valid for attendance.');
+      return;
+    }
+    
+    // Validate QR code structure - check for required fields
+    if (!qrData.subject || !qrData.batch || !qrData.school || !qrData.sessionId) {
+      console.error('❌ Incomplete QR code data:', qrData);
+      console.log('Missing fields. Required: subject, batch, school, sessionId');
+      showNotification('Invalid QR Code', 'QR code is missing required attendance information.');
+      return;
+    }
+    
+    // Check if QR code has expired
+    if (qrData.expiry && Date.now() > qrData.expiry) {
+      console.error('❌ QR code has expired');
+      showNotification('QR Code Expired', 'This QR code has expired. Please ask your faculty for a new one.');
+      return;
+    }
+    
+    // Validate against current user profile
+    const user = auth.currentUser;
+    if (!user) {
+      showNotification('Authentication Error', 'Please log in to mark attendance.');
+      return;
+    }
+    
+    // Get user profile to validate batch/school
+    const profileDoc = await db.collection('profiles').doc(user.uid).get();
+    if (!profileDoc.exists) {
+      showNotification('Profile Required', 'Please complete your profile to mark attendance.');
+      window.location.href = 'complete-profile.html';
+      return;
+    }
+    
+    const userProfile = profileDoc.data();
+    
+    // Validate batch and school match (flexible matching)
+    const qrBatch = String(qrData.batch).trim();
+    const userBatch = String(userProfile.batch).trim();
+    const qrSchool = String(qrData.school).trim();
+    const userSchool = String(userProfile.school).trim();
+    
+    console.log('Comparing QR vs User data:', {
+      qrBatch, userBatch,
+      qrSchool, userSchool
+    });
+    
+    if (qrBatch !== userBatch) {
+      console.error('Batch mismatch:', { qrBatch, userBatch });
+      showNotification('Batch Mismatch', `This QR code is for batch ${qrData.batch}, but you are in batch ${userProfile.batch}.`);
+      return;
+    }
+    
+    if (qrSchool !== userSchool) {
+      console.error('School mismatch:', { qrSchool, userSchool });
+      showNotification('School Mismatch', `This QR code is for ${qrData.school}, but you are in ${userProfile.school}.`);
+      return;
+    }
+    
+    // QR code is valid - store data and proceed to photo capture
+    currentScannedData = qrData;
+    currentUser = user;
+    studentProfile = userProfile;
+    
+    console.log('✅ QR code validated successfully');
+    
+    // Close QR scanner and open photo capture
+    // Close QR scanner and open photo capture with delay
+closeQRScanner();
+// Add delay to ensure camera is properly released
+setTimeout(() => {
+  openPhotoCapture();
+}, 500);
+
+    
+  } catch (error) {
+    console.error('❌ Error processing QR code:', error);
+    showNotification('Processing Error', 'Failed to process QR code. Please try again.');
+  }
+}
+
+// Photo Capture Functions
+window.openPhotoCapture = async function() {
+  console.log('📸 Opening photo capture...');
+  
+  try {
+    const photoCaptureModal = document.getElementById('photoCaptureModal');
+    const photoCaptureVideo = document.getElementById('photoCaptureVideo');
+    const photoStatus = document.getElementById('photoStatus');
+    const capturePhotoBtn = document.getElementById('capturePhotoBtn');
+    
+    if (!photoCaptureModal || !photoCaptureVideo) {
+      console.error('❌ Photo capture elements not found');
+      showNotification('Error', 'Photo capture interface not available.');
+      return;
+    }
+    
+    // Show photo capture modal
+    photoCaptureModal.style.display = 'block';
+    photoStatus.textContent = 'Starting camera...';
+    photoStatus.style.color = '#ffc107';
+    
+    // Request camera permission and start video stream
+    const constraints = {
+  video: {
+    facingMode: 'user',
+    width: { ideal: 640, max: 1280 },
+    height: { ideal: 480, max: 720 },
+    frameRate: { ideal: 15, max: 30 }
+  }
+};
+
+    
+    photoCaptureStream = await navigator.mediaDevices.getUserMedia(constraints);
+    photoCaptureVideo.srcObject = photoCaptureStream;
+    
+    // Wait for video to be ready
+    photoCaptureVideo.onloadedmetadata = () => {
+      photoStatus.textContent = 'Camera ready - Position your face in the frame';
+      photoStatus.style.color = '#28a745';
+      capturePhotoBtn.style.display = 'block';
+    };
+    
+    console.log('✅ Photo capture camera started');
+    
+  } catch (error) {
+    console.error('❌ Error starting photo capture:', error);
+    
+    const photoStatus = document.getElementById('photoStatus');
+    if (photoStatus) {
+      photoStatus.textContent = 'Camera access failed';
+      photoStatus.style.color = '#dc3545';
+    }
+    
+    let errorMessage = 'Failed to access camera for photo capture.';
+    if (error.name === 'NotAllowedError') {
+      errorMessage = 'Camera permission denied. Please allow camera access and try again.';
+    }
+    
+    showNotification('Camera Error', errorMessage);
+  }
+};
+
+window.closePhotoCaptureModal = function() {
+  console.log('🔒 Closing photo capture...');
+  
+  try {
+    // Stop camera stream
+    if (photoCaptureStream) {
+      photoCaptureStream.getTracks().forEach(track => track.stop());
+      photoCaptureStream = null;
+    }
+    
+    // Hide modal
+    const photoCaptureModal = document.getElementById('photoCaptureModal');
+    if (photoCaptureModal) {
+      photoCaptureModal.style.display = 'none';
+    }
+    
+    // Reset UI
+    const photoCaptureVideo = document.getElementById('photoCaptureVideo');
+    if (photoCaptureVideo) {
+      photoCaptureVideo.srcObject = null;
+    }
+    
+    // Reset buttons and status
+    const capturePhotoBtn = document.getElementById('capturePhotoBtn');
+    const retakePhotoBtn = document.getElementById('retakePhotoBtn');
+    const confirmPhotoBtn = document.getElementById('confirmPhotoBtn');
+    const photoStatus = document.getElementById('photoStatus');
+    
+    if (capturePhotoBtn) capturePhotoBtn.style.display = 'none';
+    if (retakePhotoBtn) retakePhotoBtn.style.display = 'none';
+    if (confirmPhotoBtn) confirmPhotoBtn.style.display = 'none';
+    if (photoStatus) {
+      photoStatus.textContent = 'Camera inactive';
+      photoStatus.style.color = '#6c757d';
+    }
+    
+    console.log('✅ Photo capture closed');
+    
+  } catch (error) {
+    console.error('❌ Error closing photo capture:', error);
+  }
+};
+
+window.captureStudentPhoto = function() {
+  console.log('📸 Capturing student photo...');
+  
+  try {
+    const photoCaptureVideo = document.getElementById('photoCaptureVideo');
+    const photoCaptureCanvas = document.getElementById('photoCaptureCanvas');
+    const capturedPhotoImg = document.getElementById('capturedPhotoImg');
+    const capturedPhotoPreview = document.getElementById('capturedPhotoPreview');
+    
+    if (!photoCaptureVideo || !photoCaptureCanvas || !capturedPhotoImg) {
+      console.error('❌ Required photo capture elements not found');
+      return;
+    }
+    
+    // Set canvas size to match video
+    photoCaptureCanvas.width = photoCaptureVideo.videoWidth;
+    photoCaptureCanvas.height = photoCaptureVideo.videoHeight;
+    
+    // Draw current frame to canvas
+    const context = photoCaptureCanvas.getContext('2d');
+    context.drawImage(photoCaptureVideo, 0, 0);
+    
+    // Convert to base64 image data
+    const imageData = photoCaptureCanvas.toDataURL('image/jpeg', 0.8);
+    
+    // Show captured image preview
+    capturedPhotoImg.src = imageData;
+    capturedPhotoPreview.style.display = 'block';
+    
+    // Hide video and show retake/confirm buttons
+    photoCaptureVideo.style.display = 'none';
+    document.getElementById('capturePhotoBtn').style.display = 'none';
+    document.getElementById('retakePhotoBtn').style.display = 'block';
+    document.getElementById('confirmPhotoBtn').style.display = 'block';
+    
+    // Update status
+    document.getElementById('photoStatus').textContent = 'Photo captured - Review and confirm';
+    document.getElementById('photoStatus').style.color = '#007bff';
+    
+    console.log('✅ Photo captured successfully');
+    
+  } catch (error) {
+    console.error('❌ Error capturing photo:', error);
+    showNotification('Capture Error', 'Failed to capture photo. Please try again.');
+  }
+};
+
+window.retakePhoto = function() {
+  console.log('🔄 Retaking photo...');
+  
+  try {
+    // Hide captured photo preview
+    const capturedPhotoPreview = document.getElementById('capturedPhotoPreview');
+    if (capturedPhotoPreview) {
+      capturedPhotoPreview.style.display = 'none';
+    }
+    
+    // Show video again
+    const photoCaptureVideo = document.getElementById('photoCaptureVideo');
+    if (photoCaptureVideo) {
+      photoCaptureVideo.style.display = 'block';
+    }
+    
+    // Reset buttons
+    document.getElementById('capturePhotoBtn').style.display = 'block';
+    document.getElementById('retakePhotoBtn').style.display = 'none';
+    document.getElementById('confirmPhotoBtn').style.display = 'none';
+    
+    // Reset status
+    document.getElementById('photoStatus').textContent = 'Camera ready - Position your face in the frame';
+    document.getElementById('photoStatus').style.color = '#28a745';
+    
+    console.log('✅ Ready for photo retake');
+    
+  } catch (error) {
+    console.error('❌ Error setting up photo retake:', error);
+  }
+};
+
+window.confirmPhotoAndMarkAttendance = async function() {
+  console.log('✅ Confirming photo and marking attendance...');
+  
+  try {
+    if (!currentScannedData || !currentUser || !studentProfile) {
+      console.error('❌ Missing required data for attendance marking');
+      showNotification('Error', 'Missing attendance data. Please scan QR code again.');
+      return;
+    }
+    
+    const capturedPhotoImg = document.getElementById('capturedPhotoImg');
+    if (!capturedPhotoImg || !capturedPhotoImg.src) {
+      console.error('❌ No photo captured');
+      showNotification('Error', 'Please capture a photo first.');
+      return;
+    }
+    
+    // Show processing status
+    document.getElementById('photoStatus').textContent = 'Processing attendance...';
+    document.getElementById('photoStatus').style.color = '#ffc107';
+    
+    // Get current date in IST
+    const currentDate = getISTDateString();
+    
+    // Store photo temporarily in tempPhotos collection for faculty verification
+    const tempPhotoData = {
+      studentId: currentUser.uid,
+      studentEmail: currentUser.email,
+      studentName: studentProfile.fullName || 'Unknown Student',
+      regNumber: studentProfile.regNumber || 'N/A',
+      school: studentProfile.school,
+      batch: studentProfile.batch,
+      photoData: capturedPhotoImg.src, // Base64 image data
+      qrSessionId: currentScannedData.sessionId || currentScannedData.id,
+      subject: currentScannedData.subject,
+      periods: currentScannedData.periods || 1,
+      date: currentDate,
+      timestamp: firebase.firestore.FieldValue.serverTimestamp(),
+      status: 'pending_verification'
+    };
+    
+    // Save to tempPhotos collection
+    await db.collection('tempPhotos').add(tempPhotoData);
+    
+    console.log('✅ Temporary photo saved for faculty verification');
+    
+    // Show success message
+    showNotification('Photo Submitted!', 'Your photo has been submitted for verification. Attendance will be marked after faculty approval.');
+    
+    // Add local notification
+    addNotification('attendance', 
+      `Photo submitted for ${currentScannedData.subject} - ${currentDate}`, 
+      'Just now');
+    
+    // Close photo capture modal
+    closePhotoCaptureModal();
+    
+    // Reset current data
+    currentScannedData = null;
+    currentUser = null;
+    studentProfile = null;
+    
+    console.log('✅ Attendance photo submission completed');
+    
+  } catch (error) {
+    console.error('❌ Error submitting photo for attendance:', error);
+    
+    document.getElementById('photoStatus').textContent = 'Error submitting photo';
+    document.getElementById('photoStatus').style.color = '#dc3545';
+    
+    showNotification('Submission Error', 'Failed to submit photo. Please try again.');
+  }
+};
+
 /* ===== ATTENDANCE DATA & CHART FUNCTIONS ===== */
 // Attendance Data - will be populated from Firebase
 let subjectData = {};
@@ -315,11 +804,11 @@ function showLowAttendanceWarnings() {
 let subjectChart = null;
 let overallChart = null;
 
-// QR Scanner variables
-let html5QrCode = null;
-let currentScannedData = null;
-let currentUser = null;
-let studentProfile = null;
+// QR Scanner variables (already declared above)
+// let qrScanner = null; // Already declared in camera functionality section
+// let currentScannedData = null; // Already declared
+// let currentUser = null; // Already declared
+// let studentProfile = null; // Already declared
 
 // Function to update all charts with current data
 function updateCharts() {
@@ -428,8 +917,14 @@ function getCurrentDay() {
 // Populate today's classes
 function populateTodayClasses() {
   const todayClassesList = document.getElementById('todayClassesList');
+  if (!todayClassesList) {
+    // Not all pages include this list; safe no-op
+    return;
+  }
   const currentDay = getCurrentDay();
-  const todayClasses = todayClassSchedule[currentDay] || [];
+  const todayClasses = (typeof todayClassSchedule !== 'undefined' && todayClassSchedule && todayClassSchedule[currentDay])
+    ? todayClassSchedule[currentDay]
+    : [];
   
   todayClassesList.innerHTML = '';
   
@@ -559,7 +1054,20 @@ function changeTodayAttendance(classId) {
 
 
 /* ===== FIREBASE SERVICES (from firebase-config.js) ===== */
-// Firebase services are initialized in firebase-config.js
+// Firebase services are initialized in firebase-config.js and available globally
+// Direct access to global Firebase services
+const auth = window.auth;  // Will be set by firebase-config.js
+const db = window.db;      // Will be set by firebase-config.js  
+const storage = window.storage; // Will be set by firebase-config.js
+
+// Simple check to ensure Firebase is loaded
+function ensureFirebaseLoaded() {
+  if (!window.auth || !window.db || !window.storage) {
+    console.error('❌ Firebase services not loaded yet');
+    return false;
+  }
+  return true;
+}
 
 // Helper: get YYYY-MM-DD in Asia/Kolkata
 function getISTDateString(d = new Date()) {
@@ -750,61 +1258,73 @@ function checkYesterdayScrollability() {
 }
 
 // Update `onAuthStateChanged` to call the new function
-auth.onAuthStateChanged(async (user) => {
-  if (user) {
-    console.log('User authenticated:', user.email);
-    
-    // Check if this is a new signup that needs profile completion
-    try {
-      const doc = await db.collection("users").doc(user.uid).get();
-      const data = doc.data();
-      
-      if (doc.exists && data.isNewSignup && data.role === "student") {
-        // Mark as no longer new signup and redirect to profile completion
-        await db.collection("users").doc(user.uid).update({
-          isNewSignup: false
-        });
-        console.log('New student signup detected, redirecting to complete-profile.html');
-        window.location.href = "complete-profile.html";
-        return;
-      }
-    } catch (error) {
-      console.error('Error checking signup status:', error);
-    }
-    
-    // Load dashboard data for existing users
-    console.log('🚀 Loading dashboard data for authenticated user...');
-    
-    try {
-      loadUserProfile(user);
-      fetchTodayAttendance(user); // Fetch today's attendance
-      fetchYesterdayAttendance(user); // Fetch yesterday's attendance
-      
-      console.log('📋 About to call fetchAttendanceData...');
-      await fetchAttendanceData(); // Fetch all attendance data for charts and warnings (now async)
-      console.log('✅ fetchAttendanceData completed');
-      
-      fetchNotificationsFromServer(); // Fetch real notifications from Firebase
-      
-    } catch (error) {
-      console.error('❌ Error loading dashboard data:', error);
-      // Try fallback even if main loading fails
-      try {
-        await fallbackAttendanceCalculation();
-        updateCharts();
-        showLowAttendanceWarnings();
-        updateChartsVisibility();
-      } catch (fallbackError) {
-        console.error('❌ Even fallback failed:', fallbackError);
-      }
-    }
-  } else {
-    window.location.href = 'index.html';
+function setupAuthStateListener() {
+  if (!ensureFirebaseLoaded()) {
+    console.error('❌ Firebase not loaded, retrying in 1 second...');
+    setTimeout(setupAuthStateListener, 1000);
+    return;
   }
-});
+  
+  console.log('✅ Setting up auth state listener...');
+  
+  auth.onAuthStateChanged(async (user) => {
+    if (user) {
+      console.log('User authenticated:', user.email);
+      
+      // Check if this is a new signup that needs profile completion
+      try {
+        const doc = await db.collection("users").doc(user.uid).get();
+        const data = doc.data();
+        
+        if (doc.exists && data.isNewSignup && data.role === "student") {
+          // Mark as no longer new signup and redirect to profile completion
+          await db.collection("users").doc(user.uid).update({
+            isNewSignup: false
+          });
+          console.log('New student signup detected, redirecting to complete-profile.html');
+          window.location.href = "complete-profile.html";
+          return;
+        }
+      } catch (error) {
+        console.error('Error checking signup status:', error);
+      }
+      
+      // Load dashboard data for existing users
+      console.log('🚀 Loading dashboard data for authenticated user...');
+      
+      try {
+        loadUserProfile(user);
+        fetchTodayAttendance(user); // Fetch today's attendance
+        fetchYesterdayAttendance(user); // Fetch yesterday's attendance
+        
+        console.log('📋 About to call fetchAttendanceData...');
+        await fetchAttendanceData(); // Fetch all attendance data for charts and warnings (now async)
+        console.log('✅ fetchAttendanceData completed');
+        
+        fetchNotificationsFromServer(); // Fetch real notifications from Firebase
+        
+      } catch (error) {
+        console.error('❌ Error loading dashboard data:', error);
+        // Try fallback even if main loading fails
+        try {
+          await fallbackAttendanceCalculation();
+          updateCharts();
+          showLowAttendanceWarnings();
+          updateChartsVisibility();
+        } catch (fallbackError) {
+          console.error('❌ Even fallback failed:', fallbackError);
+        }
+      }
+    } else {
+      window.location.href = 'index.html';
+    }
+  });
+}
 
 // Show profile popup only for new signups
 window.onload = function() {
+  console.log('🚀 Page loading, setting up Firebase auth...');
+  setupAuthStateListener();
   initializePage();
 }
 
@@ -815,7 +1335,7 @@ function completeProfile() {
 }
 
 // Update notifications section dynamically
-function updateNotifications(notifications) {
+function updateNotifications(notificationsArray) {
   const notificationsSection = document.getElementById('notificationsSection');
   const notificationsList = document.getElementById('notificationsList');
   const notificationCount = document.getElementById('notificationCount');
@@ -824,11 +1344,11 @@ function updateNotifications(notifications) {
   // Clear current notifications
   notificationsList.innerHTML = '';
 
-  if (notifications.length > 0) {
+  if (notificationsArray.length > 0) {
     notificationsSection.style.display = 'block';
     noNotifications.style.display = 'none';
     
-    notifications.forEach(notification => {
+    notificationsArray.forEach(notification => {
       const notificationItem = document.createElement('div');
       let itemClass = 'notification-item';
       
@@ -867,7 +1387,7 @@ function updateNotifications(notifications) {
       notificationsList.appendChild(notificationItem);
     });
     
-    notificationCount.textContent = notifications.length;
+    notificationCount.textContent = notificationsArray.length;
     notificationCount.style.display = 'inline-flex';
   } else {
     notificationsSection.style.display = 'none';
@@ -876,8 +1396,7 @@ function updateNotifications(notifications) {
   }
 }
 
-// Global notifications array
-let notifications = [];
+// Global notifications array (declared at top)
 
 // Add notification function (can be called from anywhere)
 function addNotification(type, message, timeAgo = 'Just now') {
@@ -1270,7 +1789,8 @@ function initializePage() {
 
 // Profile popup functions
 function closeProfilePopup() {
-  document.getElementById('profilePopup').style.display = 'none';
+  const popup = document.getElementById('profilePopup');
+  if (popup) popup.style.display = 'none';
 }
 
 
@@ -1426,7 +1946,8 @@ function skipProfile() {
 // Debug function to force show profile popup (for testing)
 function showProfilePopupForced() {
   console.log('Forcing profile popup to show');
-  document.getElementById('profilePopup').style.display = 'flex';
+  const popup = document.getElementById('profilePopup');
+  if (popup) popup.style.display = 'flex';
 }
 
 // Debug function to clear profile data (for testing)
@@ -1438,8 +1959,10 @@ function clearProfileData() {
   location.reload();
 }
 
-// Enhanced leave form submission with Firebase integration
-document.getElementById("leaveForm").addEventListener("submit", async function (e) {
+// Enhanced leave form submission with Firebase integration (guarded)
+const leaveFormEl = document.getElementById('leaveForm');
+if (leaveFormEl) {
+leaveFormEl.addEventListener("submit", async function (e) {
   e.preventDefault();
   
   try {
@@ -1525,7 +2048,9 @@ document.getElementById("leaveForm").addEventListener("submit", async function (
     alert('Error submitting leave request. Please try again.');
   }
 });
-
+} else {
+  console.warn('⏭️ leaveForm element not found - skipping leave form submit handler');
+}
 
 
 // Profile photo upload handler with Firebase Storage integration
@@ -2054,154 +2579,328 @@ async function tryFallbackNotificationQuery() {
 }
 
 
-/* ===== QR SCANNER FUNCTIONS ===== */
-// Global camera permission state
+/* ===== QR SCANNER FUNCTIONS - PRODUCTION READY ===== */
+// Global camera permission state and scanner variables
 let frontCameraPermissionGranted = false;
+let qrScannerInitialized = false;
 
-// Test front camera access (browser will show native permission dialog)
+// Production-ready camera access test
 async function testFrontCameraAccess() {
-  console.log('🎥 Testing front camera access...');
+  console.log('🎥 Testing camera access for production...');
   
   try {
-    // Request front camera access - browser shows native permission dialog
+    // Check if getUserMedia is supported
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      throw new Error('Camera API not supported in this browser');
+    }
+    
+    // Request camera access
     const stream = await navigator.mediaDevices.getUserMedia({
       video: { 
-        facingMode: 'user', // Front camera
+        facingMode: 'user',
         width: { ideal: 640, min: 320 },
         height: { ideal: 480, min: 240 }
       },
       audio: false
     });
     
-    console.log('✅ Front camera access granted');
+    console.log('✅ Camera access test successful');
     frontCameraPermissionGranted = true;
     
-    // Stop the test stream immediately - we just needed to check permission
-    stream.getTracks().forEach(track => track.stop());
+    // Cleanup test stream immediately
+    stream.getTracks().forEach(track => {
+      track.stop();
+    });
     
     return true;
     
   } catch (error) {
-    console.error('❌ Front camera access denied:', error);
+    console.error('❌ Camera access test failed:', error);
     frontCameraPermissionGranted = false;
     throw error;
   }
 }
 
-// Open QR Scanner Modal (with native browser permission check)
-function openQRScanner() {
-  console.log('🚀 Starting attendance marking process...');
+// Open QR Scanner Modal (with enhanced production-ready permission handling)
+async function openQRScanner() {
+  console.log('🚀 Starting production attendance marking process...');
   
-  // Directly test front camera access - browser will show native permission dialog
-  testFrontCameraAccess()
-    .then(() => {
-      console.log('✅ Front camera permission granted, opening QR scanner');
-      showNotification('Permission Granted', 'You can now scan the QR code to mark attendance.');
-      initializeQRScanner();
-    })
-    .catch((error) => {
-      console.log('❌ Front camera permission denied, cannot proceed');
-      
-      let errorMessage = 'Front camera access is required to mark attendance.';
-      if (error.name === 'NotAllowedError') {
-        errorMessage = 'Camera permission denied. Please allow front camera access to continue.';
-      } else if (error.name === 'NotFoundError') {
-        errorMessage = 'No front camera found on this device.';
-      } else if (error.name === 'NotReadableError') {
-        errorMessage = 'Camera is being used by another application. Please close other apps and try again.';
-      }
-      
-      showNotification('Permission Required', errorMessage);
+  try {
+    // Simple Firebase check
+    if (!auth || !auth.currentUser) {
+      console.error('❌ Authentication not available for QR scanning');
+      showNotification('Authentication Error', 'Please sign in again to mark attendance');
+      return;
+    }
+    
+    console.log('✅ Firebase services confirmed, proceeding with scanner...');
+    
+    // Check for HTTPS requirement (modern browsers require HTTPS for camera access)
+    if (location.protocol !== 'https:' && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1') {
+      showNotification('HTTPS Required', 'Camera access requires HTTPS. Please use a secure connection.');
+      return;
+    }
+    
+    // Check if device is mobile (recommended for attendance)
+    const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+    if (!isMobile) {
+      console.warn('⚠️ Non-mobile device detected - QR scanning works best on mobile');
+    }
+    
+    // Show loading state
+    showNotification('Requesting Permission', 'Please allow camera access to scan QR codes.');
+    
+    // Test camera access with enhanced error handling
+    console.log('🎥 Requesting camera permissions...');
+    
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { 
+        facingMode: 'user', // Front camera for permission test
+        width: { ideal: 640, min: 320 },
+        height: { ideal: 480, min: 240 }
+      },
+      audio: false
     });
+    
+    console.log('✅ Camera permission granted');
+    
+    // Stop the test stream immediately
+    stream.getTracks().forEach(track => {
+      track.stop();
+      console.log('🔄 Test stream stopped');
+    });
+    
+    // Small delay to ensure camera is released
+    await new Promise(resolve => setTimeout(resolve, 500));
+    
+    showNotification('Permission Granted', 'Initializing QR scanner...');
+    
+    // Initialize the actual scanner
+    await initializeQRScanner();
+    
+  } catch (error) {
+    console.error('❌ Camera permission or initialization failed:', error);
+    
+    let errorTitle = 'Camera Access Failed';
+    let errorMessage = 'Unable to access camera. ';
+    
+    if (error.name === 'NotAllowedError') {
+      errorMessage += 'Please allow camera permissions and try again.';
+    } else if (error.name === 'NotFoundError') {
+      errorMessage += 'No camera found on this device.';
+    } else if (error.name === 'NotReadableError') {
+      errorMessage += 'Camera is being used by another app. Please close other camera apps and try again.';
+    } else if (error.name === 'OverconstrainedError') {
+      errorMessage += 'Camera does not meet the required specifications.';
+    } else if (error.name === 'SecurityError') {
+      errorMessage += 'Camera access blocked by security policy.';
+    } else {
+      errorMessage += `Error: ${error.message}`;
+    }
+    
+    showNotification(errorTitle, errorMessage);
+  }
 }
 
 // Initialize QR Scanner (separated from permission logic)
-function initializeQRScanner() {
+async function initializeQRScanner() {
   const modal = document.getElementById('scannerModal');
-  const videoElement = document.getElementById('qrReader');
+  let videoElement = document.getElementById('qrReader');
   
-  console.log('📱 Initializing QR Scanner...');
+  console.log('📱 Initializing Production QR Scanner...');
   
-  if (!modal || !videoElement) {
-    console.error('QR Scanner modal or video element not found');
-    showNotification('Scanner Error', 'QR Scanner is not properly configured.');
+  if (!modal) {
+    console.error('QR Scanner modal not found');
+    showNotification('Scanner Error', 'QR Scanner modal missing. Please refresh the page.');
     return;
   }
+
+  // Ensure we have a valid <video> element; some pages may accidentally render a div/span
+  if (!videoElement || videoElement.tagName !== 'VIDEO') {
+    console.warn('qrReader element missing or not a <video>; creating one on the fly');
+    if (videoElement && videoElement.parentElement) {
+      // Replace non-video node with a proper video
+      const replacement = document.createElement('video');
+      replacement.id = 'qrReader';
+      videoElement.parentElement.replaceChild(replacement, videoElement);
+      videoElement = replacement;
+    } else {
+      videoElement = document.createElement('video');
+      videoElement.id = 'qrReader';
+      modal.appendChild(videoElement);
+    }
+  }
+
+  // Set attributes that mobile cameras require
+  videoElement.setAttribute('playsinline', '');
+  videoElement.setAttribute('autoplay', '');
+  videoElement.muted = true;
+
+  // Defensive: some environments can monkey-patch pause/play; provide no-op fallbacks
+  if (typeof videoElement.pause !== 'function') {
+    console.warn('video.pause is not a function; adding no-op');
+    videoElement.pause = function() { /* no-op */ };
+  }
+  if (typeof videoElement.play !== 'function') {
+    if (typeof videoElement.play !== 'function') {
+      console.warn('video.play is not a function; adding no-op that resolves');
+      videoElement.play = function() { return Promise.resolve(); };
+    }
   
   modal.style.display = 'flex';
-  
-  // Update status to show camera permission granted
+  // Update status to show initialization
   const scannerStatus = document.getElementById('scannerStatus');
   if (scannerStatus) {
-    scannerStatus.textContent = 'Camera permission granted ✅ Initializing scanner...';
-    scannerStatus.style.color = '#28a745';
+    scannerStatus.textContent = '🔄 Starting camera and scanner...';
+    scannerStatus.style.color = '#ffc107';
   }
   
-  // Initialize the QR code scanner
   try {
-    html5QrCode = new Html5Qrcode("qrReader");
+    // Wait for QrScanner library to load with timeout
+    let attempts = 0;
+    while (typeof QrScanner === 'undefined' && attempts < 50) {
+      console.log(`⏳ Waiting for QrScanner library... attempt ${attempts + 1}`);
+      await new Promise(resolve => setTimeout(resolve, 100));
+      attempts++;
+    }
     
-    const config = {
-      fps: 10,
-      qrbox: { width: 250, height: 250 },
-      aspectRatio: 1.0
-    };
+    // Check if QrScanner is available after waiting
+    if (typeof QrScanner === 'undefined') {
+      throw new Error('QR Scanner library failed to load after 5 seconds. Please refresh the page and check your internet connection.');
+    }
     
-    // Start scanning with back camera for QR codes
-    html5QrCode.start(
-      { facingMode: "environment" }, // Use back camera for QR scanning
-      config,
-      onScanSuccess,
-      onScanError
-    ).then(() => {
-      console.log('📷 QR Scanner started successfully');
-      if (scannerStatus) {
-        scannerStatus.textContent = 'Scanner active - Point camera at QR code';
-        scannerStatus.style.color = '#007bff';
+    console.log('✅ QrScanner library loaded successfully');
+    updateScannerStatus('✅ QR Scanner library ready...', 'info');
+    
+    // Configure QR Scanner library with fallback worker paths
+    try {
+      QrScanner.WORKER_PATH = 'https://unpkg.com/qr-scanner@1.4.2/qr-scanner-worker.min.js';
+    } catch (workerError) {
+      console.warn('⚠️ Primary worker path failed, trying fallback...');
+      QrScanner.WORKER_PATH = 'https://cdn.jsdelivr.net/npm/qr-scanner@1.4.2/qr-scanner-worker.min.js';
+    }
+    
+    // Check camera availability first
+    updateScannerStatus('📷 Checking camera...', 'info');
+    const hasCamera = await QrScanner.hasCamera();
+    if (!hasCamera) {
+      throw new Error('No camera found on this device');
+    }
+    
+    console.log('📷 Camera detected, initializing scanner...');
+    
+    // Create scanner with simplified, production-tested configuration
+    qrScanner = new QrScanner(
+      videoElement,
+      result => {
+        console.log('🎯 QR Code detected:', result);
+        // Extract the data properly - handle both string and object results
+        const qrText = typeof result === 'string' ? result : (result.data || result);
+        if (qrText) {
+          onScanSuccess(qrText, result);
+        } else {
+          console.warn('⚠️ QR result has no data:', result);
+        }
+      },
+      {
+        onDecodeError: (error) => {
+          // Silently handle decode errors (normal when no QR code visible)
+          if (error && !error.toString().includes('NotFoundException')) {
+            console.log('🔍 Decode error (normal):', error.toString().substring(0, 50));
+          }
+        },
+        preferredCamera: 'environment', // Back camera first
+        highlightScanRegion: true,
+        highlightCodeOutline: true,
+        returnDetailedScanResult: false, // Simplified for reliability
+        maxScansPerSecond: 3, // Reduced for stability
       }
-    }).catch(err => {
-      console.warn('Back camera failed, trying front camera for QR scanning:', err);
-      // Fallback to front camera if back camera fails
-      return html5QrCode.start(
-        { facingMode: "user" },
-        config,
-        onScanSuccess,
-        onScanError
-      );
-    }).then(() => {
-      if (scannerStatus) {
-        scannerStatus.textContent = 'Scanner active - Point camera at QR code';
-        scannerStatus.style.color = '#007bff';
+    );
+    
+    console.log('🚀 Starting QR scanner...');
+    
+    // Start with back camera (environment)
+    try {
+      await qrScanner.start();
+      console.log('✅ QR Scanner started with back camera');
+      updateScannerStatus('✅ Scanner active - Point camera at QR code', 'success');
+    } catch (backCameraError) {
+      console.warn('⚠️ Back camera failed, trying front camera:', backCameraError.message);
+      
+      try {
+        await qrScanner.setCamera('user');
+        await qrScanner.start();
+        console.log('✅ QR Scanner started with front camera');
+        updateScannerStatus('✅ Scanner active (front camera) - Point at QR code', 'success');
+      } catch (frontCameraError) {
+        // If QrScanner crashed due to video element issues, surface a clearer message
+        const detail = frontCameraError && frontCameraError.message ? frontCameraError.message : String(frontCameraError);
+        throw new Error(`Camera failed: ${detail}`);
       }
-    }).catch(err => {
-      console.error('Error starting QR scanner:', err);
-      if (scannerStatus) {
-        scannerStatus.textContent = 'Scanner failed to start';
-        scannerStatus.style.color = '#dc3545';
-      }
-      showNotification('Scanner Error', 'Unable to start QR scanner. Please try again.');
-    });
+    }
+    
   } catch (error) {
-    console.error('Error initializing QR scanner:', error);
-    showNotification('Scanner Error', 'Failed to initialize QR scanner.');
+    console.error('❌ QR Scanner initialization failed:', error);
+    updateScannerStatus(`❌ Scanner failed: ${error.message}`, 'error');
+    
+    // Show user-friendly error message
+    let userMessage = 'Failed to start QR scanner. ';
+    if (error.message.includes('camera')) {
+      userMessage += 'Please check camera permissions and try again.';
+    } else if (error.message.includes('library')) {
+      userMessage += 'Please check your internet connection and refresh the page.';
+    } else {
+      userMessage += 'Please refresh the page and try again.';
+    }
+    
+    showNotification('Scanner Error', userMessage);
+    
+    // Auto-close modal on error
+    setTimeout(() => {
+      closeQRScanner();
+    }, 3000);
+  }
+};
+
+// Helper function to update scanner status
+function updateScannerStatus(message, type = 'info') {
+  const scannerStatus = document.getElementById('scannerStatus');
+  if (scannerStatus) {
+    scannerStatus.textContent = message;
+    scannerStatus.style.color = type === 'success' ? '#28a745' : 
+                                type === 'error' ? '#dc3545' : 
+                                type === 'warning' ? '#ffc107' : '#007bff';
   }
 }
 
-// Close QR Scanner Modal
+// Close QR Scanner Modal with proper cleanup
 function closeQRScanner() {
   const modal = document.getElementById('scannerModal');
   
-  console.log('Closing QR Scanner...');
+  console.log('🔄 Closing QR Scanner with cleanup...');
   
-  // Stop the scanner if it's running
-  if (html5QrCode) {
-    html5QrCode.stop().then(() => {
-      console.log('QR Scanner stopped successfully');
-      html5QrCode = null;
-    }).catch(err => {
-      console.error('Error stopping QR scanner:', err);
-      html5QrCode = null;
-    });
+  // Stop and cleanup the scanner
+  if (qrScanner) {
+    try {
+      qrScanner.stop().then(() => {
+        console.log('✅ QR Scanner stopped successfully');
+        qrScanner.destroy();
+        qrScanner = null;
+        console.log('🧹 QR Scanner cleaned up');
+      }).catch(err => {
+        console.error('⚠️ Error stopping QR scanner:', err);
+        // Force cleanup even on error
+        try {
+          qrScanner.destroy();
+        } catch (destroyError) {
+          console.error('⚠️ Error destroying scanner:', destroyError);
+        }
+        qrScanner = null;
+      });
+    } catch (error) {
+      console.error('⚠️ Error in scanner cleanup:', error);
+      qrScanner = null;
+    }
   }
   
   // Hide the modal
@@ -2209,85 +2908,214 @@ function closeQRScanner() {
     modal.style.display = 'none';
   }
   
-  // Reset UI elements (only if they exist)
-  const scannerStatus = document.getElementById('scannerStatus');
-  if (scannerStatus) {
-    scannerStatus.textContent = 'Scanner inactive';
-    scannerStatus.style.color = '#6c757d';
-  }
+  // Reset UI elements
+  updateScannerStatus('Scanner closed', 'info');
   
   // Clear any scanned data
   currentScannedData = null;
-}
-
-// Handle successful QR scan
-function onScanSuccess(decodedText, decodedResult) {
-  console.log('QR Code scanned successfully:', decodedText);
   
-    try {
-        // Parse the QR code data
-        const qrData = JSON.parse(decodedText);
-        
-        // Validate QR code structure
-        if (!qrData.school || !qrData.batch || !qrData.subject || !qrData.periods || !qrData.timestamp || !qrData.expiry) {
-            throw new Error('Invalid QR code format');
-        }
-        
-        // Fast QR Security validation (optimized for speed)
-        if (window.validateSecureQR && qrData.security) {
-            const validationResult = window.validateSecureQR(qrData);
-            if (!validationResult.valid) {
-                showNotification('Security Check Failed', validationResult.message);
-                return;
-            }
-        }
-        
-        // Check if QR code has expired (basic validation)
-        const now = Date.now();
-        if (now > qrData.expiry) {
-            showNotification('QR Expired', 'This QR code has expired. Ask your faculty to generate a new one.');
-            return;
-        }
-    
-    // Store scanned data in both variable and localStorage for backup
-    currentScannedData = qrData;
-    localStorage.setItem('currentQrData', JSON.stringify(qrData));
-    console.log('✅ QR data stored:', qrData);
-    console.log('✅ QR data backed up to localStorage');
-    
-    // Close QR scanner
-    closeQRScanner();
-    
-    // Show success notification with details
-    const timeLeft = Math.ceil((qrData.expiry - now) / 1000);
-    showNotification(
-      'QR Scanned Successfully!',
-      `Subject: ${qrData.subject} | Batch: ${qrData.batch} | Periods: ${qrData.periods} | Now capturing photo...`
-    );
-    
-    console.log('QR Data:', qrData);
-    
-    // Open photo capture modal for verification
-    setTimeout(() => {
-      openPhotoCapture();
-    }, 1000); // Small delay to show the success message
-    
-  } catch (error) {
-    console.error('Error processing QR code:', error);
-    showNotification('Invalid QR Code', 'The scanned QR code is not valid for attendance marking.');
-  }
+  console.log('✅ QR Scanner modal closed and cleaned up');
 }
 
-// Handle scan errors (don't show for every frame)
-function onScanError(error) {
-  // Only log errors, don't show notifications for scanning errors
-  // as they happen frequently during normal scanning
-  if (error.includes('NotFoundException')) {
-    // This is normal - no QR code found in frame
+// Handle successful QR scan with enhanced validation
+function onScanSuccess(decodedText, decodedResult) {
+  console.log('🎯 QR Code scanned successfully:', decodedText);
+  
+  // Prevent multiple rapid scans
+  if (currentScannedData) {
+    console.log('⚠️ Already processing a QR code, ignoring duplicate');
     return;
   }
-  console.log('QR Scan error:', error);
+  
+  try {
+    // Validate input
+    if (!decodedText || typeof decodedText !== 'string') {
+      throw new Error('Invalid QR code data received');
+    }
+    
+    // Parse the QR code data
+    let qrData;
+    try {
+      qrData = JSON.parse(decodedText);
+    } catch (parseError) {
+      throw new Error('QR code contains invalid JSON data');
+    }
+    
+    console.log('📋 Parsed QR data:', qrData);
+    
+    // Enhanced validation of QR code structure
+    const requiredFields = ['school', 'batch', 'subject', 'periods', 'timestamp', 'expiry'];
+    const missingFields = requiredFields.filter(field => !qrData[field]);
+    
+    if (missingFields.length > 0) {
+      throw new Error(`QR code missing required fields: ${missingFields.join(', ')}`);
+    }
+    
+    // Validate data types
+    if (typeof qrData.periods !== 'number' || qrData.periods <= 0) {
+      throw new Error('Invalid periods value in QR code');
+    }
+    
+    if (typeof qrData.timestamp !== 'number' || typeof qrData.expiry !== 'number') {
+      throw new Error('Invalid timestamp or expiry in QR code');
+    }
+    
+    // Fast QR Security validation (if available)
+    if (window.validateSecureQR && qrData.security) {
+      const validationResult = window.validateSecureQR(qrData);
+      if (!validationResult.valid) {
+        showNotification('🔒 Security Check Failed', validationResult.message);
+        return;
+      }
+      console.log('✅ QR security validation passed');
+    }
+    
+    // Check if QR code has expired
+    const now = Date.now();
+    if (now > qrData.expiry) {
+      const expiredMinutesAgo = Math.round((now - qrData.expiry) / (1000 * 60));
+      showNotification('⏰ QR Code Expired', 
+        `This QR code expired ${expiredMinutesAgo} minutes ago. Please ask your faculty to generate a new one.`);
+      return;
+    }
+    
+    // Check if QR code is from the future (clock sync issues)
+    if (qrData.timestamp > now + (5 * 60 * 1000)) { // Allow 5 minutes tolerance
+      showNotification('⏰ Invalid QR Code', 'QR code appears to be from the future. Please check your device time.');
+      return;
+    }
+    
+    // Store scanned data
+    currentScannedData = qrData;
+    localStorage.setItem('currentQrData', JSON.stringify(qrData));
+    console.log('💾 QR data stored successfully');
+    
+    // Close QR scanner immediately
+    closeQRScanner();
+    
+    // Calculate time remaining
+    const timeLeft = Math.ceil((qrData.expiry - now) / 1000);
+    const minutesLeft = Math.floor(timeLeft / 60);
+    
+    // Show detailed success notification
+    showNotification(
+      '✅ QR Code Scanned!',
+      `Subject: ${qrData.subject}\nBatch: ${qrData.batch}\nPeriods: ${qrData.periods}\nValid for: ${minutesLeft}m ${timeLeft % 60}s\n\n📸 Opening camera for photo verification...`
+    );
+    
+    console.log('📊 QR Scan Summary:', {
+      subject: qrData.subject,
+      batch: qrData.batch,
+      periods: qrData.periods,
+      timeRemaining: `${minutesLeft}m ${timeLeft % 60}s`,
+      timestamp: new Date(qrData.timestamp).toLocaleString(),
+      expires: new Date(qrData.expiry).toLocaleString()
+    });
+    
+    // Small delay before opening photo capture for better UX
+    setTimeout(() => {
+      if (typeof openPhotoCapture === 'function') {
+        openPhotoCapture();
+      } else {
+        console.error('❌ openPhotoCapture function not found');
+        showNotification('Error', 'Photo capture function not available. Please refresh the page.');
+      }
+    }, 1500);
+    
+  } catch (error) {
+    console.error('❌ Error processing QR code:', error);
+    
+    // Clear any partially stored data
+    currentScannedData = null;
+    localStorage.removeItem('currentQrData');
+    
+    // Show user-friendly error message
+    let errorMessage = 'The scanned QR code is not valid for attendance marking.';
+    if (error.message.includes('JSON')) {
+      errorMessage = 'QR code format is invalid. Please scan a valid attendance QR code.';
+    } else if (error.message.includes('missing')) {
+      errorMessage = 'QR code is incomplete. Please ask your faculty to generate a new QR code.';
+    } else if (error.message.includes('timestamp') || error.message.includes('expiry')) {
+      errorMessage = 'QR code has invalid timing data. Please try again with a new QR code.';
+    }
+    
+    showNotification('❌ Invalid QR Code', errorMessage);
+  }
 }
+
+// Handle scan errors with production logging
+function onScanError(error) {
+  // Enhanced error handling for production
+  if (!error) return;
+  
+  const errorStr = error.toString();
+  
+  // Normal "no QR found" errors - don't log these
+  if (error.name === 'NotFoundException' || errorStr.includes('NotFoundException')) {
+    return;
+  }
+  
+  // Log other errors for debugging
+  if (errorStr.includes('decode') || errorStr.includes('format')) {
+    // These are normal decode errors, log occasionally
+    if (Math.random() < 0.01) { // Log 1% of decode errors
+      console.log('🔍 QR Decode error (sampling):', errorStr.substring(0, 100));
+    }
+  } else {
+    // Log more serious errors
+    console.warn('⚠️ QR Scanner error:', errorStr);
+  }
+}
+
+// Global error handler for QR scanner issues
+window.addEventListener('error', (event) => {
+  if (event.message && event.message.includes('QrScanner')) {
+    console.error('🚨 QR Scanner global error:', event.message);
+    // Attempt to recover
+    if (qrScanner) {
+      try {
+        closeQRScanner();
+      } catch (e) {
+        console.error('Failed to close scanner during error recovery:', e);
+      }
+    }
+  }
+});
+
+// Cleanup on page unload
+window.addEventListener('beforeunload', () => {
+  if (qrScanner) {
+    try {
+      qrScanner.stop();
+      qrScanner.destroy();
+    } catch (e) {
+      console.warn('Cleanup error on page unload:', e);
+    }
+  }
+});
+
+// Visibility change handler (pause/resume scanner when tab becomes hidden/visible)
+document.addEventListener('visibilitychange', () => {
+  if (qrScanner) {
+    if (document.hidden) {
+      console.log('📱 Tab hidden, pausing scanner');
+      try {
+        qrScanner.stop();
+      } catch (e) {
+        console.warn('Error pausing scanner:', e);
+      }
+    } else {
+      console.log('📱 Tab visible, resuming scanner');
+      try {
+        qrScanner.start();
+      } catch (e) {
+        console.warn('Error resuming scanner:', e);
+        // If resume fails, close the scanner
+        closeQRScanner();
+      }
+    }
+  }
+});
 
 // Mark attendance based on scanned QR data
 async function markAttendance(qrData) {
@@ -2418,7 +3246,7 @@ async function markAttendance(qrData) {
 }
 
 // Photo capture variables
-let photoCaptureStream = null;
+photoCaptureStream = null;
 let capturedPhotoData = null;
 let autoCaptureTimer = null;
 let countdownInterval = null;
@@ -2520,13 +3348,20 @@ function setupVideoElement(video, stream) {
 }
 
 // Open Photo Capture Modal
-function openPhotoCapture() {
+async function openPhotoCapture() {
   const modal = document.getElementById('photoCaptureModal');
   const video = document.getElementById('photoCaptureVideo');
   const captureBtn = document.getElementById('capturePhotoBtn');
   const photoStatus = document.getElementById('photoStatus');
   
   console.log('Opening Photo Capture modal...');
+  
+  // Simple Firebase check
+  if (!auth || !auth.currentUser) {
+    console.error('❌ Authentication not available for photo capture');
+    showNotification('Authentication Error', 'Please sign in again to capture photos');
+    return;
+  }
   
   if (!modal || !video) {
     console.error('Photo capture elements not found');
@@ -3344,4 +4179,5 @@ document.addEventListener('DOMContentLoaded', function() {
   console.log('- debugNotificationStatus() - Check notification system status');
   console.log('- debugTestFirebaseConnection() - Test Firebase connection');
   console.log('- debugCheckNotificationPermissions() - Test notification permissions');
-});
+})
+};
