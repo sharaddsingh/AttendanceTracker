@@ -8,6 +8,7 @@ LAST UPDATED: 2025-08-08 00:37:12 - FORCE REFRESH
 // --- GLOBAL VARIABLES ---
 let currentFaculty = null;
 let facultyProfile = null;
+let currentVerificationSession = null; // For photo verification
 
 // --- INITIALIZATION ---
 document.addEventListener('DOMContentLoaded', () => {
@@ -1650,6 +1651,500 @@ function extractNameFromEmail(email) {
         .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
         .join(' ');
 }
+
+// ===== PHOTO VERIFICATION FUNCTIONS =====
+/**
+ * Process absent students after QR expires - Opens photo verification modal
+ */
+// OLD FUNCTION - COMMENTED OUT FOR REFERENCE
+// async function processAbsentStudents() {
+//     console.log('📸 Processing absent students - opening photo verification modal...');
+//     
+//     try {
+//         if (!currentQRSession) {
+//             console.error('❌ No current QR session data available');
+//             return;
+//         }
+//         
+//         // Store the session data for verification
+//         currentVerificationSession = currentQRSession;
+//         
+//         // Delay slightly to allow final photo submissions
+//         setTimeout(async () => {
+//             await openPhotoVerificationModal();
+//         }, 2000); // 2-second delay for final submissions
+//         
+//     } catch (error) {
+//         console.error('❌ Error processing absent students:', error);
+//     }
+// }
+
+// ===== UPDATED FUNCTION FOR QR EXPIRY HANDLING =====
+async function processAbsentStudents() {
+  if (!currentQRSession) {
+    console.log('❌ No current QR session to process photos');
+    return;
+  }
+
+  console.log('⏰ QR Code expired - Opening photo verification modal for session:', currentQRSession);
+
+  const statusElement = document.getElementById('qrStatus');
+  if (statusElement) {
+    statusElement.innerHTML = '<p>QR Code expired. Opening photo verification...</p>';
+  }
+
+  // Wait a moment for any final photo submissions
+  setTimeout(async () => {
+    console.log('🔄 Opening photo verification modal automatically');
+    console.log('📊 Current QR Session:', currentQRSession);
+    console.log('👤 Firebase user:', firebase.auth().currentUser?.uid);
+
+    // Store current session for photo verification
+    currentVerificationSession = currentQRSession;
+    console.log('✅ Set currentVerificationSession:', currentVerificationSession);
+
+    // Check if we have a valid session before opening modal
+    if (!currentVerificationSession) {
+      console.error('❌ No verification session available!');
+      if (statusElement) {
+        statusElement.innerHTML = '<p style="color: #dc3545;">Error: No session data available for photo verification.</p>';
+      }
+      return;
+    }
+
+    // Open the photo verification modal
+    openPhotoVerificationModal();
+
+    // Auto-close the QR modal since we're moving to photo verification
+    setTimeout(() => {
+      console.log('🔒 Auto-closing QR modal as photo verification is now open');
+      closeQRModal();
+    }, 1000);
+
+    // Update status to show that photo verification is open
+    setTimeout(() => {
+      if (statusElement) {
+        statusElement.innerHTML = '<p><strong>Photo Verification Open:</strong> Review all student photos and click "Save Attendance" when ready.</p>';
+        statusElement.style.color = '#007bff';
+      }
+    }, 2000);
+
+  }, 2000); // 2-second delay to allow final photo submissions
+}
+
+/**
+ * Opens the photo verification modal automatically after QR expiry
+ */
+async function openPhotoVerificationModal() {
+    console.log('📸 Opening photo verification modal...');
+    
+    try {
+        if (!currentVerificationSession) {
+            console.error('❌ No verification session data');
+            return;
+        }
+        
+        const modal = document.getElementById('photoVerificationModal');
+        if (!modal) {
+            console.error('❌ Photo verification modal not found');
+            return;
+        }
+        
+        // Show modal
+        modal.style.display = 'block';
+        
+        // Update session info in modal
+        document.getElementById('verificationSchool').textContent = currentVerificationSession.school || 'N/A';
+        document.getElementById('verificationBatch').textContent = currentVerificationSession.batch || 'N/A';
+        document.getElementById('verificationSubject').textContent = currentVerificationSession.subject || 'N/A';
+        document.getElementById('verificationPeriods').textContent = currentVerificationSession.periods || 'N/A';
+        
+        // Load student photos from tempPhotos collection
+        await loadStudentPhotos();
+        
+    } catch (error) {
+        console.error('❌ Error opening photo verification modal:', error);
+    }
+}
+
+/**
+ * Load student photos from tempPhotos collection for verification
+ */
+async function loadStudentPhotos() {
+    console.log('📷 Loading student photos for verification...');
+    
+    try {
+        const db = firebase.firestore();
+        
+        // Query tempPhotos collection for the current session
+        const sessionId = currentVerificationSession.sessionId;
+        const currentDate = new Date().toISOString().split('T')[0]; // YYYY-MM-DD format
+        
+        console.log('🔍 Querying tempPhotos with:', {
+            qrSessionId: sessionId,
+            date: currentDate,
+            subject: currentVerificationSession.subject
+        });
+        
+        // Query for photos from this QR session
+        const photosQuery = await db.collection('tempPhotos')
+            .where('qrSessionId', '==', sessionId)
+            .get();
+        
+        console.log(`📊 Found ${photosQuery.size} student photos for verification`);
+        
+        const photosGrid = document.getElementById('photosGrid');
+        const noPhotosMessage = document.getElementById('noPhotosMessage');
+        const verificationSummary = document.getElementById('verificationSummary');
+        
+        // Clear existing content
+        photosGrid.innerHTML = '';
+        
+        if (photosQuery.empty) {
+            console.log('❌ No photos found for verification');
+            noPhotosMessage.style.display = 'block';
+            verificationSummary.style.display = 'none';
+            return;
+        }
+        
+        noPhotosMessage.style.display = 'none';
+        verificationSummary.style.display = 'block';
+        
+        // Process each photo
+        const photoData = [];
+        photosQuery.forEach(doc => {
+            const data = doc.data();
+            photoData.push({
+                id: doc.id,
+                ...data,
+                status: 'pending' // Initial status
+            });
+        });
+        
+        // Sort by student name
+        photoData.sort((a, b) => (a.studentName || '').localeCompare(b.studentName || ''));
+        
+        // Create photo cards
+        photoData.forEach(photo => {
+            createPhotoCard(photo);
+        });
+        
+        // Update summary
+        updateVerificationSummary();
+        
+    } catch (error) {
+        console.error('❌ Error loading student photos:', error);
+        
+        const noPhotosMessage = document.getElementById('noPhotosMessage');
+        noPhotosMessage.style.display = 'block';
+        noPhotosMessage.innerHTML = `
+            <i class="fas fa-exclamation-triangle" style="font-size: 48px; margin-bottom: 15px; color: #dc3545;"></i>
+            <h4>Error Loading Photos</h4>
+            <p>Failed to load student photos: ${error.message}</p>
+        `;
+    }
+}
+
+/**
+ * Create a photo card for verification
+ */
+function createPhotoCard(photoData) {
+    const photosGrid = document.getElementById('photosGrid');
+    
+    const photoCard = document.createElement('div');
+    photoCard.className = 'photo-card';
+    photoCard.id = `photo-card-${photoData.id}`;
+    photoCard.setAttribute('data-photo-id', photoData.id);
+    photoCard.setAttribute('data-status', photoData.status);
+    
+    photoCard.innerHTML = `
+        <div class="photo-container" onclick="toggleAttendanceStatus('${photoData.id}')">
+            <img src="${photoData.photoData}" alt="Student Photo" class="student-photo">
+            <div class="photo-overlay" id="overlay-${photoData.id}">
+                <span class="status-text" id="status-${photoData.id}">NOT REVIEWED</span>
+            </div>
+        </div>
+        <div class="photo-info">
+            <h5>${photoData.studentName || 'Unknown Student'}</h5>
+            <p><strong>Reg:</strong> ${photoData.regNumber || 'N/A'}</p>
+            <p><strong>Email:</strong> ${photoData.studentEmail || 'N/A'}</p>
+        </div>
+        <div class="photo-actions">
+            <button class="photo-action-btn present-btn" onclick="setPhotoStatus('${photoData.id}', 'present')">
+                <i class="fas fa-check"></i> Present
+            </button>
+            <button class="photo-action-btn absent-btn" onclick="setPhotoStatus('${photoData.id}', 'absent')">
+                <i class="fas fa-times"></i> Absent
+            </button>
+        </div>
+    `;
+    
+    photosGrid.appendChild(photoCard);
+    updatePhotoCardStatus(photoData.id, photoData.status);
+}
+
+/**
+ * Toggle attendance status for a photo (click on photo)
+ */
+function toggleAttendanceStatus(photoId) {
+    const photoCard = document.getElementById(`photo-card-${photoId}`);
+    const currentStatus = photoCard.getAttribute('data-status');
+    
+    let newStatus;
+    switch (currentStatus) {
+        case 'pending':
+            newStatus = 'present';
+            break;
+        case 'present':
+            newStatus = 'absent';
+            break;
+        case 'absent':
+            newStatus = 'pending';
+            break;
+        default:
+            newStatus = 'present';
+    }
+    
+    setPhotoStatus(photoId, newStatus);
+}
+
+/**
+ * Set photo status (Present/Absent/Pending)
+ */
+function setPhotoStatus(photoId, status) {
+    const photoCard = document.getElementById(`photo-card-${photoId}`);
+    if (!photoCard) return;
+    
+    photoCard.setAttribute('data-status', status);
+    updatePhotoCardStatus(photoId, status);
+    updateVerificationSummary();
+    
+    console.log(`Photo ${photoId} status updated to: ${status}`);
+}
+
+/**
+ * Update photo card visual status
+ */
+function updatePhotoCardStatus(photoId, status) {
+    const photoCard = document.getElementById(`photo-card-${photoId}`);
+    const overlay = document.getElementById(`overlay-${photoId}`);
+    const statusText = document.getElementById(`status-${photoId}`);
+    
+    if (!photoCard || !overlay || !statusText) return;
+    
+    // Remove all status classes
+    photoCard.classList.remove('pending', 'present', 'absent');
+    
+    // Add current status class
+    photoCard.classList.add(status);
+    
+    // Update overlay and text
+    switch (status) {
+        case 'present':
+            overlay.style.background = 'rgba(40, 167, 69, 0.9)';
+            statusText.textContent = 'PRESENT';
+            statusText.style.color = 'white';
+            photoCard.style.borderColor = '#28a745';
+            break;
+        case 'absent':
+            overlay.style.background = 'rgba(220, 53, 69, 0.9)';
+            statusText.textContent = 'ABSENT';
+            statusText.style.color = 'white';
+            photoCard.style.borderColor = '#dc3545';
+            break;
+        case 'pending':
+        default:
+            overlay.style.background = 'rgba(255, 193, 7, 0.9)';
+            statusText.textContent = 'NOT REVIEWED';
+            statusText.style.color = 'black';
+            photoCard.style.borderColor = '#ffc107';
+    }
+}
+
+/**
+ * Update verification summary counts
+ */
+function updateVerificationSummary() {
+    const photoCards = document.querySelectorAll('.photo-card');
+    let totalPhotos = photoCards.length;
+    let presentCount = 0;
+    let absentCount = 0;
+    let pendingCount = 0;
+    
+    photoCards.forEach(card => {
+        const status = card.getAttribute('data-status');
+        switch (status) {
+            case 'present':
+                presentCount++;
+                break;
+            case 'absent':
+                absentCount++;
+                break;
+            case 'pending':
+            default:
+                pendingCount++;
+        }
+    });
+    
+    // Update summary display
+    document.getElementById('totalPhotos').textContent = totalPhotos;
+    document.getElementById('presentCount').textContent = presentCount;
+    document.getElementById('absentCount').textContent = absentCount;
+    document.getElementById('pendingCount').textContent = pendingCount;
+    
+    console.log('📊 Verification summary updated:', {
+        total: totalPhotos,
+        present: presentCount,
+        absent: absentCount,
+        pending: pendingCount
+    });
+}
+
+/**
+ * Save attendance based on photo verification
+ */
+async function saveAttendance() {
+    console.log('💾 Saving attendance based on photo verification...');
+    
+    try {
+        if (!currentVerificationSession) {
+            alert('No verification session data available.');
+            return;
+        }
+        
+        const photoCards = document.querySelectorAll('.photo-card');
+        if (photoCards.length === 0) {
+            alert('No photos to process.');
+            return;
+        }
+        
+        const db = firebase.firestore();
+        const batch = db.batch();
+        const currentDate = new Date().toISOString().split('T')[0];
+        
+        let presentCount = 0;
+        let absentCount = 0;
+        let processedCount = 0;
+        
+        // Process each photo card
+        for (const photoCard of photoCards) {
+            const photoId = photoCard.getAttribute('data-photo-id');
+            const status = photoCard.getAttribute('data-status');
+            
+            if (status === 'pending') continue; // Skip unreviewed photos
+            
+            try {
+                // Get photo data
+                const photoDoc = await db.collection('tempPhotos').doc(photoId).get();
+                if (!photoDoc.exists) {
+                    console.warn(`Photo ${photoId} not found in tempPhotos`);
+                    continue;
+                }
+                
+                const photoData = photoDoc.data();
+                
+                // Only create attendance record for Present students
+                if (status === 'present') {
+                    const attendanceRecord = {
+                        userId: photoData.studentId,
+                        studentName: photoData.studentName,
+                        regNumber: photoData.regNumber,
+                        email: photoData.studentEmail,
+                        school: currentVerificationSession.school,
+                        batch: currentVerificationSession.batch,
+                        subject: currentVerificationSession.subject,
+                        periods: currentVerificationSession.periods || 1,
+                        date: currentDate,
+                        status: 'present',
+                        markedAt: firebase.firestore.FieldValue.serverTimestamp(),
+                        markedBy: currentFaculty.uid,
+                        facultyName: facultyProfile ? facultyProfile.fullName : currentFaculty.email,
+                        method: 'qr_photo_verification',
+                        hasPhoto: false, // Photos not stored permanently
+                        photoVerified: true,
+                        verificationNotes: 'Photo verified by faculty but not stored permanently',
+                        sessionId: currentVerificationSession.sessionId,
+                        classTime: currentVerificationSession.classTime || new Date().toTimeString().substr(0, 5),
+                        generatedAt: new Date().toISOString()
+                    };
+                    
+                    const attendanceRef = db.collection('attendances').doc();
+                    batch.set(attendanceRef, attendanceRecord);
+                    
+                    presentCount++;
+                } else if (status === 'absent') {
+                    absentCount++;
+                }
+                
+                // Mark photo for cleanup
+                batch.delete(db.collection('tempPhotos').doc(photoId));
+                processedCount++;
+                
+            } catch (error) {
+                console.error(`Error processing photo ${photoId}:`, error);
+            }
+        }
+        
+        if (processedCount === 0) {
+            alert('Please review photos before saving attendance.');
+            return;
+        }
+        
+        // Show confirmation
+        const confirmMessage = `Save attendance with these results?\n\n` +
+                              `✅ Present: ${presentCount} students\n` +
+                              `❌ Absent/Rejected: ${absentCount} students\n\n` +
+                              `Only Present students will receive attendance.`;
+        
+        if (!confirm(confirmMessage)) {
+            return;
+        }
+        
+        // Commit the batch
+        await batch.commit();
+        
+        console.log('✅ Attendance saved successfully');
+        
+        // Show success message
+        showSuccessMessage(
+            `Attendance saved successfully!\n\n` +
+            `Present: ${presentCount} students\n` +
+            `Absent/Rejected: ${absentCount} students\n` +
+            `Subject: ${currentVerificationSession.subject}\n` +
+            `Session: ${currentVerificationSession.sessionId.substr(-6)}`
+        );
+        
+        // Close modal and cleanup
+        closePhotoVerificationModal();
+        
+    } catch (error) {
+        console.error('❌ Error saving attendance:', error);
+        alert(`Error saving attendance: ${error.message}. Please try again.`);
+    }
+}
+
+/**
+ * Close photo verification modal
+ */
+function closePhotoVerificationModal() {
+    const modal = document.getElementById('photoVerificationModal');
+    if (modal) {
+        modal.style.display = 'none';
+    }
+    
+    // Clear session data
+    currentVerificationSession = null;
+    
+    console.log('📸 Photo verification modal closed');
+}
+
+// Make functions globally accessible
+window.processAbsentStudents = processAbsentStudents;
+window.openPhotoVerificationModal = openPhotoVerificationModal;
+window.toggleAttendanceStatus = toggleAttendanceStatus;
+window.setPhotoStatus = setPhotoStatus;
+window.saveAttendance = saveAttendance;
+window.closePhotoVerificationModal = closePhotoVerificationModal;
 
 // ===== REPORTS SECTION FUNCTIONS =====
 
@@ -3511,8 +4006,7 @@ window.closePhotoModal = closePhotoModal;
 
 // ===== PHOTO VERIFICATION SYSTEM =====
 
-// Global variables for photo verification
-let currentVerificationSession = null;
+// Global variables for photo verification (currentVerificationSession declared at top)
 let pendingPhotos = [];
 let attendanceDecisions = {}; // { photoId: 'present' | 'absent' | 'pending' }
 let verificationStats = { total: 0, present: 0, absent: 0, pending: 0 };
@@ -3561,117 +4055,200 @@ function closePhotoVerificationModal() {
 /**
  * Loads pending photos for faculty verification
  */
+// OLD FUNCTION - COMMENTED OUT FOR REFERENCE
+// async function loadPendingPhotosForVerification() {
+//     try {
+//         console.log('Loading pending photos for verification...');
+//         const db = firebase.firestore();
+//         const user = firebase.auth().currentUser;
+//         
+//         if (!user) {
+//             alert('Please log in to access photo verification.');
+//             return;
+//         }
+//         
+//         // Use current verification session if available, otherwise current QR session
+//         const session = currentVerificationSession || currentQRSession;
+//         if (!session) {
+//             console.log('No active session found for photo verification');
+//             const photosGrid = document.getElementById('photosGrid');
+//             const noPhotosMessage = document.getElementById('noPhotosMessage');
+//             photosGrid.innerHTML = '';
+//             noPhotosMessage.style.display = 'block';
+//             return;
+//         }
+//         
+//         console.log('Loading photos for session:', session);
+//         
+//         // Show loading state
+//         const photosGrid = document.getElementById('photosGrid');
+//         const noPhotosMessage = document.getElementById('noPhotosMessage');
+//         
+//         photosGrid.innerHTML = '<div style="text-align: center; padding: 40px; grid-column: 1 / -1;"><i class="fas fa-spinner fa-spin" style="font-size: 24px; margin-bottom: 10px;"></i><p>Loading photos...</p></div>';
+//         noPhotosMessage.style.display = 'none';
+//         
+//         // Get today's date for filtering
+//         const today = new Date().toISOString().split('T')[0];
+//         
+//         // Query for temp photos from the current session
+//         // Simplified query to avoid composite index requirement
+//         let tempPhotosQuery;
+//         
+//         try {
+//             // Try with session-specific query first
+//             tempPhotosQuery = await db.collection('tempPhotos')
+//                 .where('qrSessionId', '==', session.sessionId)
+//                 .where('status', '==', 'pending_verification')
+//                 .get();
+//         } catch (sessionError) {
+//             console.warn('Session-specific query failed, trying faculty-wide query:', sessionError);
+//             
+//             // Fallback: Query all pending photos for this faculty today
+//             tempPhotosQuery = await db.collection('tempPhotos')
+//                 .where('facultyId', '==', user.uid)
+//                 .where('status', '==', 'pending_verification')
+//                 .get();
+//         }
+//         
+//         console.log(`Found ${tempPhotosQuery.docs.length} total photos from query`);
+//         
+//         // Filter photos to match current session and today's date (client-side filtering)
+//         const filteredPhotos = [];
+//         tempPhotosQuery.docs.forEach(doc => {
+//             const data = doc.data();
+//             
+//             // Check if photo matches current session criteria
+//             const matchesSession = data.qrSessionId === session.sessionId;
+//             const matchesDate = data.date === today;
+//             const matchesFaculty = data.facultyId === user.uid;
+//             const isPending = data.status === 'pending_verification';
+//             
+//             if (matchesSession && matchesDate && matchesFaculty && isPending) {
+//                 filteredPhotos.push({
+//                     id: doc.id,
+//                     ...data
+//                 });
+//             }
+//         });
+//         
+//         console.log(`Found ${filteredPhotos.length} photos matching current session`);
+//         
+//         if (filteredPhotos.length === 0) {
+//             photosGrid.innerHTML = '';
+//             noPhotosMessage.style.display = 'block';
+//             updateVerificationSummary();
+//             return;
+//         }
+//         
+//         // Process and display filtered photos
+//         pendingPhotos = filteredPhotos;
+//         
+//         // Group photos by session for easier verification
+//         const photosBySession = groupPhotosBySession(pendingPhotos);
+//         
+//         await displayPhotosForVerification(photosBySession);
+//         // updateVerificationSummary is now called inside displayPhotosForVerification
+//         
+//     } catch (error) {
+//         console.error('Error loading pending photos:', error);
+//         
+//         // Show simple error message
+//         const photosGrid = document.getElementById('photosGrid');
+//         if (photosGrid) {
+//             photosGrid.innerHTML = '';
+//         }
+//         
+//         const noPhotosMessage = document.getElementById('noPhotosMessage');
+//         if (noPhotosMessage) {
+//             noPhotosMessage.style.display = 'block';
+//         }
+//         
+//         // Log error but don't show complex error to user
+//         alert('Unable to load photos. Please try again.');
+//     }
+// }
+
+// SIMPLE TEMPHOTOS FETCHING - NO COMPLEX LOGIC
 async function loadPendingPhotosForVerification() {
+    console.log('📸 Simple tempPhotos fetch...');
+    
     try {
-        console.log('Loading pending photos for verification...');
         const db = firebase.firestore();
         const user = firebase.auth().currentUser;
         
-        if (!user) {
-            alert('Please log in to access photo verification.');
-            return;
-        }
+        console.log('👤 User:', user?.uid);
         
-        // Use current verification session if available, otherwise current QR session
-        const session = currentVerificationSession || currentQRSession;
-        if (!session) {
-            console.log('No active session found for photo verification');
-            const photosGrid = document.getElementById('photosGrid');
-            const noPhotosMessage = document.getElementById('noPhotosMessage');
-            photosGrid.innerHTML = '';
-            noPhotosMessage.style.display = 'block';
-            return;
-        }
-        
-        console.log('Loading photos for session:', session);
-        
-        // Show loading state
         const photosGrid = document.getElementById('photosGrid');
         const noPhotosMessage = document.getElementById('noPhotosMessage');
         
-        photosGrid.innerHTML = '<div style="text-align: center; padding: 40px; grid-column: 1 / -1;"><i class="fas fa-spinner fa-spin" style="font-size: 24px; margin-bottom: 10px;"></i><p>Loading photos...</p></div>';
-        noPhotosMessage.style.display = 'none';
+        // Show loading
+        photosGrid.innerHTML = '<div style="text-align: center; padding: 20px;"><i class="fas fa-spinner fa-spin"></i> Loading...</div>';
         
-        // Get today's date for filtering
-        const today = new Date().toISOString().split('T')[0];
+        // SIMPLE QUERY - Just get ALL tempPhotos
+        const allPhotos = await db.collection('tempPhotos').get();
         
-        // Query for temp photos from the current session
-        // Simplified query to avoid composite index requirement
-        let tempPhotosQuery;
+        console.log('📊 Found', allPhotos.size, 'total photos');
         
-        try {
-            // Try with session-specific query first
-            tempPhotosQuery = await db.collection('tempPhotos')
-                .where('qrSessionId', '==', session.sessionId)
-                .where('status', '==', 'pending_verification')
-                .get();
-        } catch (sessionError) {
-            console.warn('Session-specific query failed, trying faculty-wide query:', sessionError);
-            
-            // Fallback: Query all pending photos for this faculty today
-            tempPhotosQuery = await db.collection('tempPhotos')
-                .where('facultyId', '==', user.uid)
-                .where('status', '==', 'pending_verification')
-                .get();
+        if (allPhotos.size === 0) {
+            photosGrid.innerHTML = '<div style="text-align: center; padding: 40px;"><h4>No Photos in Database</h4></div>';
+            return;
         }
         
-        console.log(`Found ${tempPhotosQuery.docs.length} total photos from query`);
-        
-        // Filter photos to match current session and today's date (client-side filtering)
-        const filteredPhotos = [];
-        tempPhotosQuery.docs.forEach(doc => {
+        // Display all photos
+        photosGrid.innerHTML = '';
+        allPhotos.forEach(doc => {
             const data = doc.data();
+            console.log('📷 Photo:', data.studentName, data.subject);
             
-            // Check if photo matches current session criteria
-            const matchesSession = data.qrSessionId === session.sessionId;
-            const matchesDate = data.date === today;
-            const matchesFaculty = data.facultyId === user.uid;
-            const isPending = data.status === 'pending_verification';
+            const card = document.createElement('div');
+            card.style.cssText = 'background: white; border: 1px solid #ddd; padding: 15px; margin: 10px 0; border-radius: 8px;';
             
-            if (matchesSession && matchesDate && matchesFaculty && isPending) {
-                filteredPhotos.push({
-                    id: doc.id,
-                    ...data
-                });
-            }
+            card.innerHTML = `
+                <div style="display: flex; gap: 15px; align-items: center;">
+                    ${data.photoData ? 
+                        `<img src="${data.photoData}" style="width: 60px; height: 60px; border-radius: 50%; object-fit: cover;">` :
+                        `<div style="width: 60px; height: 60px; border-radius: 50%; background: #f0f0f0; display: flex; align-items: center; justify-content: center;"><i class="fas fa-user"></i></div>`
+                    }
+                    <div style="flex: 1;">
+                        <h4 style="margin: 0;">${data.studentName || 'Unknown'}</h4>
+                        <p style="margin: 5px 0 0 0; color: #666;">Subject: ${data.subject || 'Unknown'}</p>
+                        <p style="margin: 5px 0 0 0; color: #888; font-size: 12px;">Date: ${data.date || 'Unknown'}</p>
+                    </div>
+                    <button style="background: #28a745; color: white; border: none; padding: 8px 16px; border-radius: 4px;">PRESENT</button>
+                </div>
+            `;
+            
+            photosGrid.appendChild(card);
         });
         
-        console.log(`Found ${filteredPhotos.length} photos matching current session`);
-        
-        if (filteredPhotos.length === 0) {
-            photosGrid.innerHTML = '';
-            noPhotosMessage.style.display = 'block';
-            updateVerificationSummary();
-            return;
-        }
-        
-        // Process and display filtered photos
-        pendingPhotos = filteredPhotos;
-        
-        // Group photos by session for easier verification
-        const photosBySession = groupPhotosBySession(pendingPhotos);
-        
-        await displayPhotosForVerification(photosBySession);
-        // updateVerificationSummary is now called inside displayPhotosForVerification
+        console.log('✅ Displayed', allPhotos.size, 'photos');
         
     } catch (error) {
-        console.error('Error loading pending photos:', error);
-        
-        // Show simple error message
-        const photosGrid = document.getElementById('photosGrid');
-        if (photosGrid) {
-            photosGrid.innerHTML = '';
-        }
-        
-        const noPhotosMessage = document.getElementById('noPhotosMessage');
-        if (noPhotosMessage) {
-            noPhotosMessage.style.display = 'block';
-        }
-        
-        // Log error but don't show complex error to user
-        alert('Unable to load photos. Please try again.');
+        console.error('❌ Error:', error);
+        document.getElementById('photosGrid').innerHTML = `
+            <div style="text-align: center; padding: 40px; color: red;">
+                <h4>Error: ${error.message}</h4>
+                <button onclick="loadPendingPhotosForVerification()" style="padding: 8px 16px; margin-top: 10px;">Try Again</button>
+            </div>
+        `;
     }
 }
+
+// Simple test function
+window.testTempPhotos = async function() {
+    console.log('🧪 Testing tempPhotos access...');
+    try {
+        const photos = await firebase.firestore().collection('tempPhotos').get();
+        console.log('📊 Photos found:', photos.size);
+        
+        photos.forEach(doc => {
+            console.log('📷', doc.id, doc.data());
+        });
+    } catch (error) {
+        console.error('❌ Error:', error);
+    }
+};
+
 
 /**
  * Groups photos by session (date, subject, batch)
@@ -4396,3 +4973,241 @@ window.toggleAttendanceStatus = toggleAttendanceStatus;
 window.updatePhotoCardDisplay = updatePhotoCardDisplay;
 window.saveAttendance = saveAttendance;
 window.manualCleanupTempPhotos = manualCleanupTempPhotos;
+
+// ===== ADDITIONAL FUNCTIONS FOR PHOTO VERIFICATION =====
+
+// Function to display photos for verification
+async function displayPhotosForVerification(photos) {
+  const photosGrid = document.getElementById('photosGrid');
+  photosGrid.innerHTML = '';
+
+  let photoCount = 0;
+
+  console.log('🖼️ Displaying', photos.length, 'photos for verification');
+
+  // Group photos by session for better organization
+  const photosBySession = {};
+  photos.forEach(photo => {
+    const sessionKey = `${photo.subject}_${photo.batch}_${photo.date}`;
+    if (!photosBySession[sessionKey]) {
+      photosBySession[sessionKey] = {
+        subject: photo.subject,
+        batch: photo.batch,
+        school: photo.school,
+        date: photo.date,
+        periods: photo.periods,
+        qrSessionId: photo.qrSessionId,
+        photos: []
+      };
+    }
+    photosBySession[sessionKey].photos.push(photo);
+  });
+
+  // Display photos by session
+  for (const [sessionKey, session] of Object.entries(photosBySession)) {
+    // Add session header
+    const sessionHeader = document.createElement('div');
+    sessionHeader.style.cssText = `
+      grid-column: 1 / -1;
+      background: #e9ecef;
+      padding: 10px;
+      border-radius: 6px;
+      margin-bottom: 10px;
+      font-weight: 600;
+    `;
+
+    let formattedDate = session.date;
+    try {
+      const dateObj = new Date(session.date);
+      if (!isNaN(dateObj.getTime())) {
+        formattedDate = dateObj.toLocaleDateString('en-IN', {
+          day: '2-digit',
+          month: '2-digit', 
+          year: 'numeric',
+          timeZone: 'Asia/Kolkata'
+        });
+      }
+    } catch (error) {
+      console.warn('Date formatting error in session header:', error);
+    }
+
+    sessionHeader.innerHTML = `
+      <div style="display: flex; justify-content: space-between; align-items: center;">
+        <span>
+          ${session.subject} - ${session.batch} - ${session.school}
+          <br><small style="font-weight: normal; color: #666;">${formattedDate} • ${session.periods} periods</small>
+        </span>
+        <span style="background: #ffc107; color: #000; padding: 4px 8px; border-radius: 4px; font-size: 12px;">
+          ${session.photos.length} photos
+        </span>
+      </div>
+    `;
+    photosGrid.appendChild(sessionHeader);
+
+    // Add individual photo cards
+    session.photos.forEach((photo, index) => {
+      const photoCard = createPhotoAttendanceCard(photo, photoCount + index);
+      if (photoCard) {
+        photosGrid.appendChild(photoCard);
+      }
+    });
+
+    photoCount += session.photos.length;
+  }
+
+  // Initialize attendance decisions for all photos (default to present)
+  if (typeof attendanceDecisions === 'undefined') {
+    window.attendanceDecisions = {};
+  }
+  photos.forEach(photo => {
+    attendanceDecisions[photo.id] = 'present'; // Students who submitted photos default to present
+  });
+
+  // Update verification summary if function exists
+  if (typeof updateVerificationSummary === 'function') {
+    updateVerificationSummary();
+  }
+
+  console.log('✅ Successfully displayed', photoCount, 'photos');
+}
+
+// Function to create photo attendance card (if missing)
+function createPhotoAttendanceCard(photo, index) {
+  try {
+    const card = document.createElement('div');
+    card.className = 'photo-card';
+    card.style.cssText = `
+      background: white;
+      border: 1px solid #ddd;
+      border-radius: 8px;
+      padding: 15px;
+      margin-bottom: 10px;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    `;
+
+    // Format timestamp
+    let timeDisplay = 'Unknown time';
+    if (photo.timestamp) {
+      try {
+        const date = photo.timestamp.toDate ? photo.timestamp.toDate() : new Date(photo.timestamp);
+        timeDisplay = date.toLocaleTimeString('en-IN', {
+          hour: '2-digit',
+          minute: '2-digit',
+          timeZone: 'Asia/Kolkata'
+        });
+      } catch (error) {
+        console.warn('Time formatting error:', error);
+      }
+    }
+
+    card.innerHTML = `
+      <div style="display: flex; align-items: center; gap: 15px;">
+        <div style="flex-shrink: 0;">
+          ${photo.photoData ? 
+            `<img src="${photo.photoData}" alt="Student Photo" style="width: 60px; height: 60px; border-radius: 50%; object-fit: cover;">` :
+            `<div style="width: 60px; height: 60px; border-radius: 50%; background: #f0f0f0; display: flex; align-items: center; justify-content: center; color: #666;">
+              <i class="fas fa-user" style="font-size: 24px;"></i>
+            </div>`
+          }
+        </div>
+        <div style="flex: 1;">
+          <h4 style="margin: 0 0 5px 0; color: #333;">${photo.studentName || 'Unknown Student'}</h4>
+          <p style="margin: 0; color: #666; font-size: 14px;">${photo.regNumber || 'No Reg Number'}</p>
+          <p style="margin: 5px 0 0 0; color: #888; font-size: 12px;">
+            <i class="fas fa-clock"></i> ${timeDisplay}
+          </p>
+        </div>
+        <div style="text-align: right;">
+          <span class="attendance-status present" style="
+            background: #28a745; 
+            color: white; 
+            padding: 4px 12px; 
+            border-radius: 20px; 
+            font-size: 12px;
+            font-weight: 600;
+          ">PRESENT</span>
+        </div>
+      </div>
+    `;
+
+    // Add click handler
+    card.onclick = function() {
+      toggleStudentAttendance(photo.id, card);
+    };
+
+    return card;
+  } catch (error) {
+    console.error('Error creating photo card:', error);
+    return null;
+  }
+}
+
+// Function to toggle student attendance status
+function toggleStudentAttendance(photoId, cardElement) {
+  try {
+    if (typeof attendanceDecisions === 'undefined') {
+      window.attendanceDecisions = {};
+    }
+
+    // Cycle through: present → absent → present
+    const currentStatus = attendanceDecisions[photoId] || 'present';
+    const newStatus = currentStatus === 'present' ? 'absent' : 'present';
+
+    attendanceDecisions[photoId] = newStatus;
+
+    // Update visual indicator
+    const statusElement = cardElement.querySelector('.attendance-status');
+    if (statusElement) {
+      statusElement.textContent = newStatus.toUpperCase();
+      statusElement.className = `attendance-status ${newStatus}`;
+      statusElement.style.background = newStatus === 'present' ? '#28a745' : '#dc3545';
+    }
+
+    console.log(`📝 Updated attendance for photo ${photoId}: ${newStatus}`);
+
+    // Update summary if function exists
+    if (typeof updateVerificationSummary === 'function') {
+      updateVerificationSummary();
+    }
+  } catch (error) {
+    console.error('Error toggling attendance:', error);
+  }
+}
+
+// Debug function to test tempPhotos access
+window.testTempPhotos = async function() {
+  try {
+    const db = firebase.firestore();
+    const user = firebase.auth().currentUser;
+
+    console.log('🧪 Testing tempPhotos access...');
+    console.log('👤 Current user:', user?.uid);
+
+    // Test basic access
+    const allPhotos = await db.collection('tempPhotos').limit(5).get();
+    console.log('📊 Total tempPhotos accessible:', allPhotos.size);
+
+    allPhotos.forEach(doc => {
+      const data = doc.data();
+      console.log('📷 Photo:', {
+        id: doc.id,
+        studentName: data.studentName,
+        subject: data.subject,
+        date: data.date,
+        facultyId: data.facultyId,
+        status: data.status
+      });
+    });
+
+    // Test today's photos
+    const today = new Date().toISOString().split('T')[0];
+    const todayPhotos = await db.collection('tempPhotos').where('date', '==', today).get();
+    console.log('📅 Today\'s photos:', todayPhotos.size);
+
+  } catch (error) {
+    console.error('❌ Error testing tempPhotos:', error);
+  }
+};
+
+console.log('✅ Faculty Dashboard with Photo Verification - Updated Functions Loaded');
